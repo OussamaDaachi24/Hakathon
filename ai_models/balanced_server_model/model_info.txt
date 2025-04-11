@@ -1,0 +1,7 @@
+Model created on: 2025-04-11 16:49:29
+Created by: Cheateyy
+Features used: load-1m, load-5m, load-15m, sys-thermal, mem_usage_pct, swap_usage_pct, load_delta, cpu-iowait, cpu-system, cpu-user, cpu_total, io_total
+Model type: XGBClassifier
+Number of estimators: 1000
+Learning rate: 0.05
+Max depth: 4

@@ -2,94 +2,133 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
-import sqlite3
+from datetime import datetime, timezone
 
-def load_model_components(model_dir="./server_performance_model"):
-    """Load the trained model, scaler and feature list."""
-    model = joblib.load(os.path.join(model_dir, "performance_model.pkl"))
-    scaler = joblib.load(os.path.join(model_dir, "scaler.pkl"))
-    features = joblib.load(os.path.join(model_dir, "features.pkl"))
-    return model, scaler, features
-
-def predict_degradation(temperature, humidity, server_load, fans_speed, model_dir="./server_performance_model"):
-    """Predict server degradation from temperature log data."""
-    # Load model components
-    model, scaler, features = load_model_components(model_dir)
+class ServerHealthMonitor:
+    """Server health monitoring system with ML insights and rule-based classification"""
     
-    # Create a mapping from available data to expected features
-    # We'll need to make some assumptions for missing features
-    feature_data = {
-        # Map available fields to their closest corresponding features
-        'load-1m': server_load,                # Use server_load as the 1-minute load
-        'load-5m': server_load * 0.9,          # Estimate 5-minute load as slightly lower
-        'load-15m': server_load * 0.8,         # Estimate 15-minute load as even lower
-        'sys-thermal': temperature,            # Use temperature as thermal data
+    def __init__(self, model_dir="./balanced_server_model"):
+        """Initialize the monitor with trained model and components"""
+        self.model = joblib.load(os.path.join(model_dir, "performance_model.pkl"))
+        self.scaler = joblib.load(os.path.join(model_dir, "scaler.pkl"))
+        self.features = joblib.load(os.path.join(model_dir, "features.pkl"))
         
-        # Set defaults for unavailable data with reasonable values
-        'mem_usage_pct': 0.7,                  # Assume 70% memory usage
-        'swap_usage_pct': 0.3,                 # Assume 30% swap usage
-        'cpu-iowait': 1.0,                     # Assume 1% CPU in I/O wait
-        'cpu-system': 5.0,                     # Assume 5% CPU in system tasks
-        'cpu-user': 30.0                       # Assume 30% CPU in user tasks
-    }
+        # Load metadata
+        try:
+            with open(os.path.join(model_dir, "model_info.txt"), "r") as f:
+                self.model_info = f.read()
+        except:
+            self.model_info = "Model metadata not available"
     
-    # Calculate load_delta like in the training code
-    feature_data['load_delta'] = feature_data['load-1m'] - feature_data['load-5m']
-    
-    # Create a DataFrame with the expected features in the correct order
-    input_df = pd.DataFrame([feature_data])
-    
-    # Extract just the features the model expects
-    input_features = input_df[features]
-    
-    # Scale the features using the same scaler used during training
-    input_scaled = scaler.transform(input_features)
-    
-    # Make prediction
-    degradation_probability = model.predict_proba(input_scaled)[0, 1]
-    degradation_predicted = model.predict(input_scaled)[0]
-    
-    return {
-        'degradation_predicted': bool(degradation_predicted),
-        'degradation_probability': float(degradation_probability),
-        'status': 'Potential degradation detected' if degradation_predicted else 'Normal operation'
-    }
-
-# Example of predicting from database records
-def predict_from_recent_logs(db_path, num_records=10, model_dir="./server_performance_model"):
-    """Get predictions for the most recent records in the database."""
-    # Connect to SQLite database
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Get the most recent records
-    query = """
-    SELECT timestamp, temperature, humidity, server_load, fans_speed
-    FROM temperature_logs
-    ORDER BY timestamp DESC
-    LIMIT ?
-    """
-    cursor.execute(query, (num_records,))
-    records = cursor.fetchall()
-    
-    # Make predictions for each record
-    results = []
-    for record in records:
-        timestamp, temperature, humidity, server_load, fans_speed = record
-        # Use 0 as default for NULL values
-        humidity = humidity or 0
-        server_load = server_load or 0
-        fans_speed = fans_speed or 0
+    def predict(self, temperature, server_load, cpu_user,
+               cpu_system=0.5, cpu_iowait=0.1, memory_pct=0.2):
+        """Predict server health primarily using rule-based classification"""
+        # Get current timestamp
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         
-        prediction = predict_degradation(temperature, humidity, server_load, fans_speed, model_dir)
-        results.append({
+        # Create feature data
+        feature_data = {
+            'load-1m': server_load,
+            'load-5m': server_load * 0.9,
+            'load-15m': server_load * 0.8,
+            'sys-thermal': temperature,
+            'mem_usage_pct': memory_pct,
+            'swap_usage_pct': 0.05,
+            'cpu-iowait': cpu_iowait,
+            'cpu-system': cpu_system,
+            'cpu-user': cpu_user
+        }
+        
+        # Calculate derived features
+        feature_data['load_delta'] = feature_data['load-1m'] - feature_data['load-5m']
+        
+        if 'cpu_total' in self.features:
+            feature_data['cpu_total'] = cpu_user + cpu_system + cpu_iowait
+        if 'io_total' in self.features:
+            feature_data['io_total'] = 0
+        
+        # Create DataFrame
+        input_df = pd.DataFrame([feature_data])
+        input_features = input_df[self.features]
+        input_scaled = self.scaler.transform(input_features)
+        
+        # Get ML prediction probability
+        ml_probability = float(self.model.predict_proba(input_scaled)[0, 1])
+        
+        # RULE-BASED CLASSIFICATION
+        # Apply rule-based status determination - entirely separate from ML prediction
+        if temperature > 75 or server_load > 3.5 or cpu_user > 90:
+            status = "CRITICAL"
+            risk_level = 4
+            action_needed = "Immediate intervention required"
+        elif temperature > 65 or server_load > 2.5 or cpu_user > 70:
+            status = "WARNING"
+            risk_level = 3
+            action_needed = "Monitor closely and prepare for intervention"
+        elif temperature > 55 or server_load > 1.5 or cpu_user > 50:
+            status = "CAUTION"
+            risk_level = 2
+            action_needed = "Monitor for further changes"
+        else:
+            status = "NORMAL"
+            risk_level = 1
+            action_needed = "No action needed"
+        
+        # Generate detailed explanation
+        explanation = []
+        if temperature > 55:
+            explanation.append(f"Temperature is elevated ({temperature}°C)")
+        if server_load > 1.5:
+            explanation.append(f"Server load is elevated ({server_load})")
+        if cpu_user > 50:
+            explanation.append(f"CPU usage is high ({cpu_user}%)")
+        if not explanation:
+            explanation = ["All metrics within acceptable ranges"]
+        
+        # Return comprehensive result
+        return {
             'timestamp': timestamp,
-            'temperature': temperature,
-            'humidity': humidity,
-            'server_load': server_load,
-            'fans_speed': fans_speed,
-            'prediction': prediction
-        })
+            'status': status,
+            'risk_level': risk_level,
+            'action_needed': action_needed,
+            'ml_insight': {
+                'degradation_probability': ml_probability,
+                'note': "ML model shows high sensitivity to degradation signals"
+            },
+            'explanation': ". ".join(explanation),
+            'metrics': {
+                'temperature': float(temperature),
+                'server_load': float(server_load),
+                'cpu_user': float(cpu_user),
+                'cpu_system': float(cpu_system),
+                'cpu_iowait': float(cpu_iowait),
+                'memory_pct': float(memory_pct)
+            }
+        }
+
+# Example usage
+if __name__ == "__main__":
+    monitor = ServerHealthMonitor()
     
-    conn.close()
-    return results
+    # Test cases from very low to very high stress
+    test_cases = [
+        # temp, load, cpu_user, description
+        (25.0, 0.1, 1.0, "Very Low Stress"),
+        (35.0, 0.5, 10.0, "Low Stress"),
+        (45.0, 1.0, 25.0, "Normal Operation"),
+        (55.0, 1.5, 40.0, "Moderate Stress"),
+        (65.0, 2.5, 60.0, "High Stress"),
+        (75.0, 3.5, 80.0, "Very High Stress"),
+        (85.0, 4.5, 95.0, "Critical Stress")
+    ]
+    
+    print("FINAL SERVER HEALTH MONITORING SYSTEM")
+    print("=" * 80)
+    print(f"{'SCENARIO':<20} {'STATUS':<10} {'RISK':<6} {'ML PROB':<10} {'ACTION NEEDED'}")
+    print("-" * 80)
+    
+    for temp, load, cpu, desc in test_cases:
+        result = monitor.predict(temperature=temp, server_load=load, cpu_user=cpu)
+        
+        print(f"{desc:<20} {result['status']:<10} {result['risk_level']:<6} " + 
+              f"{result['ml_insight']['degradation_probability']:.4f}   {result['action_needed']}")
