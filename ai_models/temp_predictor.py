@@ -199,3 +199,174 @@
 #         predicted_temp = predictor.predict(input_data)
         
 #         print(f"\nPredicted temperature: {predicted_temp:.2f}°C")
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import joblib
+import os
+
+def predict_using_trained_model(recent_data_path, model_folder, prediction_hours=1):
+    """
+    Use the pre-trained model to predict temperature
+    
+    Parameters:
+    recent_data_path: Path to CSV file with recent server room data
+    model_folder: Folder containing the saved model files
+    prediction_hours: Number of hours ahead to predict
+    
+    Returns:
+    Predicted temperature
+    """
+    print(f"Looking for model in: {os.path.abspath(model_folder)}")
+    
+    # Check if model files exist
+    model_path = os.path.join(model_folder, 'xgb_model.pkl')
+    features_path = os.path.join(model_folder, 'feature_columns.pkl')
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found at {model_path}")
+    if not os.path.exists(features_path):
+        raise FileNotFoundError(f"Feature columns file not found at {features_path}")
+        
+    # Load the model
+    xgb_model = joblib.load(model_path)
+    
+    # Load feature columns
+    feature_columns = joblib.load(features_path)
+    print(f"Loaded model with {len(feature_columns)} features")
+    
+    # Load and preprocess recent data
+    print(f"Loading data from: {recent_data_path}")
+    recent_data = pd.read_csv(recent_data_path)
+    print(f"Loaded data with {len(recent_data)} rows and columns: {list(recent_data.columns)}")
+    
+    processed_data = preprocess_data(recent_data)
+    
+    # Prepare features for prediction
+    X_pred = prepare_prediction_features(processed_data, feature_columns)
+    
+    # Make prediction
+    prediction = xgb_model.predict(X_pred.iloc[-1:].values)[0]
+    
+    # Get timestamp for prediction
+    last_timestamp = processed_data['datetime'].iloc[-1]
+    prediction_timestamp = last_timestamp + timedelta(hours=prediction_hours)
+    
+    print(f"\nPrediction Results for {prediction_timestamp}:")
+    print(f"Temperature Prediction: {prediction:.2f}°C")
+    
+    return {
+        'timestamp': prediction_timestamp,
+        'prediction': prediction
+    }
+
+def preprocess_data(df):
+    """
+    Preprocess the data for prediction, similar to the training preprocessing
+    """
+    # Make a copy to avoid modifying the original
+    data = df.copy()
+    
+    # Convert datetime format
+    data['datetime'] = pd.to_datetime(data['datetime'], format='%d/%m/%Y %H:%M')
+    
+    # Sort by datetime
+    data = data.sort_values('datetime').reset_index(drop=True)
+    
+    # Extract time-based features
+    data['hour'] = data['datetime'].dt.hour
+    data['minute'] = data['datetime'].dt.minute
+    data['day_of_week'] = data['datetime'].dt.dayofweek
+    data['day_of_month'] = data['datetime'].dt.day
+    data['month'] = data['datetime'].dt.month
+    
+    # Create cyclical features
+    data['hour_sin'] = np.sin(2 * np.pi * data['hour']/24)
+    data['hour_cos'] = np.cos(2 * np.pi * data['hour']/24)
+    data['dow_sin'] = np.sin(2 * np.pi * data['day_of_week']/7)
+    data['dow_cos'] = np.cos(2 * np.pi * data['day_of_week']/7)
+    
+    # Create lag features for temperature
+    for lag in [1, 2, 3, 6, 12, 24]:
+        if len(data) > lag:
+            data[f'temp_lag_{lag}'] = data['temperature'].shift(lag)
+    
+    # Calculate rate of change
+    if len(data) > 1:
+        data['temp_diff'] = data['temperature'].diff()
+        data['temp_diff_rate'] = data['temp_diff'] / data['temperature'].shift(1) * 100
+    
+    # Calculate rolling statistics
+    if len(data) > 6:
+        data['temp_rolling_mean_6'] = data['temperature'].rolling(window=6).mean()
+        data['temp_rolling_std_6'] = data['temperature'].rolling(window=6).std()
+    
+    # Drop rows with NaN values
+    data_clean = data.dropna().reset_index(drop=True)
+    
+    return data_clean
+
+def prepare_prediction_features(data, feature_columns):
+    """
+    Prepare the features needed for prediction
+    """
+    # Select all existing columns that match the expected feature columns
+    available_features = [col for col in feature_columns if col in data.columns]
+    X = data[available_features].copy()
+    
+    # Add any missing columns with zeros
+    for col in feature_columns:
+        if col not in X.columns:
+            X[col] = 0.0
+    
+    # Ensure columns are in the correct order
+    X = X[feature_columns]
+    
+    # Handle any NaN or infinite values
+    for col in X.columns:
+        X[col] = X[col].replace([np.inf, -np.inf], np.nan)
+    X = X.fillna(X.mean())
+    
+    return X
+
+if __name__ == "__main__":
+    print("Temperature Prediction Using Pre-trained Model")
+    print(f"Current Date and Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Model folder is found correctly
+    model_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
+    
+    # Properly get user input for data file
+    print("\nPlease enter the path to your CSV file with recent data:")
+    recent_data_path = input("> ").strip()
+    
+    # Validate the file exists
+    while not os.path.isfile(recent_data_path):
+        print(f"Error: File not found at {recent_data_path}")
+        print("Please enter a valid path to your CSV file (or 'exit' to quit):")
+        recent_data_path = input("> ").strip()
+        if recent_data_path.lower() == 'exit':
+            print("Exiting program.")
+            exit()
+    
+    # How many hours ahead to predict
+    print("\nHow many hours ahead would you like to predict? (default: 1)")
+    try:
+        prediction_hours = int(input("> ") or "1")
+    except ValueError:
+        print("Invalid input, using default of 1 hour")
+        prediction_hours = 1
+    
+    # Make prediction
+    try:
+        prediction = predict_using_trained_model(
+            recent_data_path=recent_data_path,
+            model_folder=model_folder,
+            prediction_hours=prediction_hours
+        )
+        
+        print("\nSuccessfully generated prediction!")
+        print(f"Predicted temperature for {prediction['timestamp']}: {prediction['prediction']:.2f}°C")
+        
+    except Exception as e:
+        print(f"\nError during prediction: {e}")
