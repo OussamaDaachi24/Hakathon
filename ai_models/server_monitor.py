@@ -1,3 +1,4 @@
+# ai_models/server_monitor.py
 import pandas as pd
 import numpy as np
 import joblib
@@ -7,7 +8,7 @@ from datetime import datetime, timezone
 class ServerHealthMonitor:
     """Server health monitoring system with ML insights and rule-based classification"""
     
-    def __init__(self, model_dir="./balanced_server_model"):
+    def __init__(self, model_dir="./ai_models/balanced_server_model"):
         """Initialize the monitor with trained model and components"""
         self.model = joblib.load(os.path.join(model_dir, "performance_model.pkl"))
         self.scaler = joblib.load(os.path.join(model_dir, "scaler.pkl"))
@@ -105,30 +106,3 @@ class ServerHealthMonitor:
                 'memory_pct': float(memory_pct)
             }
         }
-
-# Example usage
-if __name__ == "__main__":
-    monitor = ServerHealthMonitor()
-    
-    # Test cases from very low to very high stress
-    test_cases = [
-        # temp, load, cpu_user, description
-        (25.0, 0.1, 1.0, "Very Low Stress"),
-        (35.0, 0.5, 10.0, "Low Stress"),
-        (45.0, 1.0, 25.0, "Normal Operation"),
-        (55.0, 1.5, 40.0, "Moderate Stress"),
-        (65.0, 2.5, 60.0, "High Stress"),
-        (75.0, 3.5, 80.0, "Very High Stress"),
-        (85.0, 4.5, 95.0, "Critical Stress")
-    ]
-    
-    print("FINAL SERVER HEALTH MONITORING SYSTEM")
-    print("=" * 80)
-    print(f"{'SCENARIO':<20} {'STATUS':<10} {'RISK':<6} {'ML PROB':<10} {'ACTION NEEDED'}")
-    print("-" * 80)
-    
-    for temp, load, cpu, desc in test_cases:
-        result = monitor.predict(temperature=temp, server_load=load, cpu_user=cpu)
-        
-        print(f"{desc:<20} {result['status']:<10} {result['risk_level']:<6} " + 
-              f"{result['ml_insight']['degradation_probability']:.4f}   {result['action_needed']}")
